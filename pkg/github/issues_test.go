@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2163,15 +2167,15 @@ func Test_GetIssueLabels(t *testing.T) {
 	}
 }
 
-func TestAssignCopilotToIssue(t *testing.T) {
+func TestAssignGitHubCopilotToIssue(t *testing.T) {
 	t.Parallel()
 
 	// Verify tool definition
-	serverTool := AssignCopilotToIssue(translations.NullTranslationHelper)
+	serverTool := AssignGitHubCopilotToIssue(translations.NullTranslationHelper)
 	tool := serverTool.Tool
 	require.NoError(t, toolsnaps.Test(tool.Name, tool))
 
-	assert.Equal(t, "assign_copilot_to_issue", tool.Name)
+	assert.Equal(t, "assign_github_copilot_to_issue", tool.Name)
 	assert.NotEmpty(t, tool.Description)
 	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "owner")
 	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "repo")
@@ -2584,6 +2588,282 @@ func TestAssignCopilotToIssue(t *testing.T) {
 			require.Equal(t, textContent.Text, "successfully assigned copilot to issue")
 		})
 	}
+}
+
+func TestAssignCopilotToIssue(t *testing.T) {
+	// NOTE: This test uses environment variables via t.Setenv, so it must not run in parallel.
+
+	serverTool := AssignCopilotToIssue(translations.NullTranslationHelper)
+	tool := serverTool.Tool
+	require.NoError(t, toolsnaps.Test(tool.Name, tool))
+
+	assert.Equal(t, "assign_copilot_to_issue", tool.Name)
+	assert.NotEmpty(t, tool.Description)
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "owner")
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "repo")
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "issueNumber")
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "createPullRequest")
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "base")
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "branch")
+	assert.ElementsMatch(t, tool.InputSchema.(*jsonschema.Schema).Required, []string{"owner", "repo", "issueNumber"})
+
+	t.Run("missing Azure OpenAI env vars", func(t *testing.T) {
+		client := github.NewClient(&http.Client{})
+		deps := BaseDeps{Client: client}
+		handler := serverTool.Handler(deps)
+
+		request := createMCPRequest(map[string]any{"owner": "o", "repo": "r", "issueNumber": float64(1)})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getErrorResult(t, result)
+		assert.Contains(t, textContent.Text, "AZURE_OPENAI_ENDPOINT")
+	})
+
+	t.Run("creates comment when none exists", func(t *testing.T) {
+		var createdBody atomic.Value
+
+		githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/123":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"number":123,"title":"Test issue","body":"Body","html_url":"https://github.com/owner/repo/issues/123"}`)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/123/comments":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `[]`)
+				return
+			case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues/123/comments":
+				b, _ := io.ReadAll(r.Body)
+				createdBody.Store(string(b))
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":55,"body":"ok"}`)
+				return
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(githubServer.Close)
+
+		aoaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.NotFound(w, r)
+				return
+			}
+			if !strings.Contains(r.URL.Path, "/openai/deployments/test-deployment/chat/completions") {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Generated response"}}]}`)
+		}))
+		t.Cleanup(aoaiServer.Close)
+
+		t.Setenv("AZURE_OPENAI_ENDPOINT", aoaiServer.URL)
+		t.Setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
+		t.Setenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
+		t.Setenv("AZURE_OPENAI_API_KEY", "test-key")
+
+		u, err := url.Parse(githubServer.URL + "/")
+		require.NoError(t, err)
+		httpClient := &http.Client{}
+		client := github.NewClient(httpClient)
+		client.BaseURL = u
+		client.UploadURL = u
+
+		deps := BaseDeps{Client: client}
+		handler := serverTool.Handler(deps)
+
+		request := createMCPRequest(map[string]any{"owner": "owner", "repo": "repo", "issueNumber": float64(123)})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "successfully posted")
+
+		created := createdBody.Load()
+		require.NotNil(t, created)
+		assert.Contains(t, created.(string), "github-mcp-server:assign_copilot_to_issue")
+		assert.Contains(t, created.(string), "Generated response")
+	})
+
+	t.Run("updates existing comment when marker exists", func(t *testing.T) {
+		var createdCount atomic.Int32
+		var editedCount atomic.Int32
+		var editedID atomic.Int64
+
+		existingID := int64(99)
+		existingBody := assignCopilotToIssueMarker + "\n\nOld"
+
+		githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/123":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"number":123,"title":"Test issue","body":"Body","html_url":"https://github.com/owner/repo/issues/123"}`)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/123/comments":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, fmt.Sprintf(`[{"id":%d,"body":%q}]`, existingID, existingBody))
+				return
+			case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues/123/comments":
+				createdCount.Add(1)
+				http.NotFound(w, r)
+				return
+			case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/repos/owner/repo/issues/comments/"):
+				editedCount.Add(1)
+				idStr := strings.TrimPrefix(r.URL.Path, "/repos/owner/repo/issues/comments/")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+				editedID.Store(id)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":99,"body":"ok"}`)
+				return
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(githubServer.Close)
+
+		aoaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"New response"}}]}`)
+		}))
+		t.Cleanup(aoaiServer.Close)
+
+		t.Setenv("AZURE_OPENAI_ENDPOINT", aoaiServer.URL)
+		t.Setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
+		t.Setenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
+		t.Setenv("AZURE_OPENAI_API_KEY", "test-key")
+
+		u, err := url.Parse(githubServer.URL + "/")
+		require.NoError(t, err)
+		client := github.NewClient(&http.Client{})
+		client.BaseURL = u
+		client.UploadURL = u
+
+		deps := BaseDeps{Client: client}
+		handler := serverTool.Handler(deps)
+		request := createMCPRequest(map[string]any{"owner": "owner", "repo": "repo", "issueNumber": float64(123)})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "successfully updated")
+		assert.Equal(t, int32(0), createdCount.Load())
+		assert.Equal(t, int32(1), editedCount.Load())
+		assert.Equal(t, existingID, editedID.Load())
+	})
+
+	t.Run("creates pull request when createPullRequest is true", func(t *testing.T) {
+		var sawCreateRef atomic.Bool
+		var sawCreateTree atomic.Bool
+		var sawCreateCommit atomic.Bool
+		var sawUpdateRef atomic.Bool
+		var sawCreatePR atomic.Bool
+		var branchGetCount atomic.Int32
+
+		githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Minimal set of endpoints required by the handler.
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/123":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"number":123,"title":"Test issue","body":"Body","html_url":"https://github.com/owner/repo/issues/123"}`)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"default_branch":"main"}`)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/git/ref/heads/main":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"ref":"refs/heads/main","object":{"sha":"base-sha"}}`)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/git/ref/heads/aoai/issue-123":
+				// Branch does not exist on first check; after creation the handler fetches it again.
+				if branchGetCount.Add(1) == 1 {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"ref":"refs/heads/aoai/issue-123","object":{"sha":"base-sha"}}`)
+				return
+			case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/refs":
+				sawCreateRef.Store(true)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"ref":"refs/heads/aoai/issue-123","object":{"sha":"base-sha"}}`)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/git/commits/base-sha":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"sha":"base-sha","tree":{"sha":"base-tree"}}`)
+				return
+			case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/trees":
+				sawCreateTree.Store(true)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"sha":"new-tree"}`)
+				return
+			case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/commits":
+				sawCreateCommit.Store(true)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"sha":"new-commit"}`)
+				return
+			case r.Method == http.MethodPatch && r.URL.Path == "/repos/owner/repo/git/refs/heads/aoai/issue-123":
+				sawUpdateRef.Store(true)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"ref":"refs/heads/aoai/issue-123","object":{"sha":"new-commit"}}`)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/pulls":
+				// List PRs for head/base - return none.
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `[]`)
+				return
+			case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/pulls":
+				sawCreatePR.Store(true)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":101,"html_url":"https://github.com/owner/repo/pull/1"}`)
+				return
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(githubServer.Close)
+
+		aoaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"{\"commit_message\":\"test\",\"pr_title\":\"title\",\"pr_body\":\"body\",\"files\":[{\"path\":\"README.md\",\"content\":\"hello\"}]}"}}]}`)
+		}))
+		t.Cleanup(aoaiServer.Close)
+
+		t.Setenv("AZURE_OPENAI_ENDPOINT", aoaiServer.URL)
+		t.Setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
+		t.Setenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
+		t.Setenv("AZURE_OPENAI_API_KEY", "test-key")
+
+		u, err := url.Parse(githubServer.URL + "/")
+		require.NoError(t, err)
+		client := github.NewClient(&http.Client{})
+		client.BaseURL = u
+		client.UploadURL = u
+
+		deps := BaseDeps{Client: client}
+		handler := serverTool.Handler(deps)
+
+		request := createMCPRequest(map[string]any{
+			"owner":             "owner",
+			"repo":              "repo",
+			"issueNumber":       float64(123),
+			"createPullRequest": true,
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "https://github.com/owner/repo/pull/1")
+		assert.True(t, sawCreateRef.Load())
+		assert.True(t, sawCreateTree.Load())
+		assert.True(t, sawCreateCommit.Load())
+		assert.True(t, sawUpdateRef.Load())
+		assert.True(t, sawCreatePR.Load())
+	})
 }
 
 func Test_AddSubIssue(t *testing.T) {

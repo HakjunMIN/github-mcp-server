@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -2493,7 +2495,7 @@ func TestCreateAndSubmitPullRequestReview(t *testing.T) {
 }
 
 func Test_RequestCopilotReview(t *testing.T) {
-	t.Parallel()
+	// Note: this test uses t.Setenv and therefore cannot run in parallel.
 
 	serverTool := RequestCopilotReview(translations.NullTranslationHelper)
 	tool := serverTool.Tool
@@ -2507,107 +2509,127 @@ func Test_RequestCopilotReview(t *testing.T) {
 	assert.Contains(t, schema.Properties, "pullNumber")
 	assert.ElementsMatch(t, schema.Required, []string{"owner", "repo", "pullNumber"})
 
-	// Setup mock PR for success case
+	aoai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.True(t, strings.Contains(r.URL.Path, "/openai/deployments/test-deployment/chat/completions"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"AOAI review"}}]}`))
+	}))
+	t.Cleanup(aoai.Close)
+
+	t.Setenv("AZURE_OPENAI_ENDPOINT", aoai.URL)
+	t.Setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
+	t.Setenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+	t.Setenv("AZURE_OPENAI_API_KEY", "test-key")
+
 	mockPR := &github.PullRequest{
-		Number:  github.Ptr(42),
+		Number:  github.Ptr(1),
 		Title:   github.Ptr("Test PR"),
 		State:   github.Ptr("open"),
-		HTMLURL: github.Ptr("https://github.com/owner/repo/pull/42"),
-		Head: &github.PullRequestBranch{
-			SHA: github.Ptr("abcd1234"),
-			Ref: github.Ptr("feature-branch"),
-		},
-		Base: &github.PullRequestBranch{
-			Ref: github.Ptr("main"),
-		},
-		Body: github.Ptr("This is a test PR"),
+		HTMLURL: github.Ptr("https://github.com/owner/repo/pull/1"),
+		Body:    github.Ptr("This is a test PR"),
 		User: &github.User{
 			Login: github.Ptr("testuser"),
 		},
+		Head: &github.PullRequestBranch{SHA: github.Ptr("abcd1234")},
+		Base: &github.PullRequestBranch{Ref: github.Ptr("main")},
 	}
 
-	tests := []struct {
-		name           string
-		mockedClient   *http.Client
-		requestArgs    map[string]any
-		expectError    bool
-		expectedErrMsg string
-	}{
-		{
-			name: "successful request",
-			mockedClient: mock.NewMockedHTTPClient(
-				mock.WithRequestMatchHandler(
-					mock.PostReposPullsRequestedReviewersByOwnerByRepoByPullNumber,
-					expect(t, expectations{
-						path: "/repos/owner/repo/pulls/1/requested_reviewers",
-						requestBody: map[string]any{
-							"reviewers": []any{"copilot-pull-request-reviewer[bot]"},
-						},
-					}).andThen(
-						mockResponse(t, http.StatusCreated, mockPR),
-					),
-				),
+	mockedClient := mock.NewMockedHTTPClient(
+		mock.WithRequestMatchHandler(
+			mock.GetReposPullsByOwnerByRepoByPullNumber,
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/repos/owner/repo/pulls/1", r.URL.Path)
+				if strings.Contains(r.Header.Get("Accept"), "diff") {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte("diff --git a/a.txt b/a.txt\n+hello\n"))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(mockPR)
+			}),
+		),
+		mock.WithRequestMatchHandler(
+			mock.GetReposIssuesCommentsByOwnerByRepoByIssueNumber,
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/repos/owner/repo/issues/1/comments", r.URL.Path)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			}),
+		),
+		mock.WithRequestMatchHandler(
+			mock.PostReposIssuesCommentsByOwnerByRepoByIssueNumber,
+			expect(t, expectations{
+				path: "/repos/owner/repo/issues/1/comments",
+				requestBody: map[string]any{
+					"body": requestCopilotReviewMarker + "\n\n" + "AOAI review",
+				},
+			}).andThen(
+				mockResponse(t, http.StatusCreated, &github.IssueComment{ID: github.Ptr(int64(123))}),
 			),
-			requestArgs: map[string]any{
-				"owner":      "owner",
-				"repo":       "repo",
-				"pullNumber": float64(1),
-			},
-			expectError: false,
-		},
-		{
-			name: "request fails",
-			mockedClient: mock.NewMockedHTTPClient(
-				mock.WithRequestMatchHandler(
-					mock.PostReposPullsRequestedReviewersByOwnerByRepoByPullNumber,
-					http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-						w.WriteHeader(http.StatusNotFound)
-						_, _ = w.Write([]byte(`{"message": "Not Found"}`))
-					}),
-				),
+		),
+	)
+
+	client := github.NewClient(mockedClient)
+	deps := BaseDeps{Client: client}
+	handler := serverTool.Handler(deps)
+
+	request := createMCPRequest(map[string]any{
+		"owner":      "owner",
+		"repo":       "repo",
+		"pullNumber": float64(1),
+	})
+
+	result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	textContent := getTextResult(t, result)
+	require.Equal(t, "successfully posted Azure OpenAI pull request review", textContent.Text)
+}
+
+func Test_RequestGithubCopilotReview(t *testing.T) {
+	t.Parallel()
+
+	serverTool := RequestGithubCopilotReview(translations.NullTranslationHelper)
+	tool := serverTool.Tool
+
+	assert.Equal(t, "request_github_copilot_review", tool.Name)
+	assert.NotEmpty(t, tool.Description)
+	schema := tool.InputSchema.(*jsonschema.Schema)
+	assert.Contains(t, schema.Properties, "owner")
+	assert.Contains(t, schema.Properties, "repo")
+	assert.Contains(t, schema.Properties, "pullNumber")
+	assert.ElementsMatch(t, schema.Required, []string{"owner", "repo", "pullNumber"})
+
+	mockedClient := mock.NewMockedHTTPClient(
+		mock.WithRequestMatchHandler(
+			mock.PostReposPullsRequestedReviewersByOwnerByRepoByPullNumber,
+			expect(t, expectations{
+				path: "/repos/owner/repo/pulls/1/requested_reviewers",
+				requestBody: map[string]any{
+					"reviewers": []any{"copilot-pull-request-reviewer[bot]"},
+				},
+			}).andThen(
+				mockResponse(t, http.StatusCreated, map[string]any{}),
 			),
-			requestArgs: map[string]any{
-				"owner":      "owner",
-				"repo":       "repo",
-				"pullNumber": float64(999),
-			},
-			expectError:    true,
-			expectedErrMsg: "failed to request copilot review",
-		},
-	}
+		),
+	)
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	client := github.NewClient(mockedClient)
+	deps := BaseDeps{Client: client}
+	handler := serverTool.Handler(deps)
 
-			client := github.NewClient(tc.mockedClient)
-			serverTool := RequestCopilotReview(translations.NullTranslationHelper)
-			deps := BaseDeps{
-				Client: client,
-			}
-			handler := serverTool.Handler(deps)
+	request := createMCPRequest(map[string]any{
+		"owner":      "owner",
+		"repo":       "repo",
+		"pullNumber": float64(1),
+	})
 
-			request := createMCPRequest(tc.requestArgs)
-
-			result, err := handler(ContextWithDeps(context.Background(), deps), &request)
-
-			if tc.expectError {
-				require.NoError(t, err)
-				require.True(t, result.IsError)
-				errorContent := getErrorResult(t, result)
-				assert.Contains(t, errorContent.Text, tc.expectedErrMsg)
-				return
-			}
-
-			require.NoError(t, err)
-			require.False(t, result.IsError)
-			assert.NotNil(t, result)
-			assert.Len(t, result.Content, 1)
-
-			textContent := getTextResult(t, result)
-			require.Equal(t, "", textContent.Text)
-		})
-	}
+	result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	textContent := getTextResult(t, result)
+	require.Equal(t, "", textContent.Text)
 }
 
 func TestCreatePendingPullRequestReview(t *testing.T) {

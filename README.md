@@ -757,6 +757,14 @@ The following sets of tools are available:
   - `repo`: Repository name (string, required)
 
 - **assign_copilot_to_issue** - Assign Copilot to issue
+  - `base`: Base branch to target when creating a pull request (defaults to repository default branch) (string, optional)
+  - `branch`: Branch name to use for the pull request (defaults to aoai/issue-<issueNumber>) (string, optional)
+  - `createPullRequest`: If true, create a branch, push changes, and open a pull request instead of posting a comment (boolean, optional)
+  - `issueNumber`: Issue number (number, required)
+  - `owner`: Repository owner (string, required)
+  - `repo`: Repository name (string, required)
+
+- **assign_github_copilot_to_issue** - Assign Copilot to issue
   - `issueNumber`: Issue number (number, required)
   - `owner`: Repository owner (string, required)
   - `repo`: Repository name (string, required)

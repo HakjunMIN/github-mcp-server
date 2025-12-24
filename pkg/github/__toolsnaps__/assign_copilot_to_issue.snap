@@ -3,15 +3,22 @@
     "idempotentHint": true,
     "title": "Assign Copilot to issue"
   },
-  "description": "Assign Copilot to a specific issue in a GitHub repository.\n\nThis tool can help with the following outcomes:\n- a Pull Request created with source code changes to resolve the issue\n\n\nMore information can be found at:\n- https://docs.github.com/en/copilot/using-github-copilot/using-copilot-coding-agent-to-work-on-tasks/about-assigning-tasks-to-copilot\n",
+  "description": "Use Azure OpenAI to respond to a GitHub issue by posting a comment or creating a pull request.\n\nThis tool can help with the following outcomes:\n- an issue comment created or updated with analysis and next steps\n- a pull request opened with proposed code changes\n\n\nMore information can be found at:\n- https://learn.microsoft.com/azure/ai-services/openai/\n",
   "inputSchema": {
     "type": "object",
-    "required": [
-      "owner",
-      "repo",
-      "issueNumber"
-    ],
     "properties": {
+      "base": {
+        "type": "string",
+        "description": "Base branch to target when creating a pull request (defaults to repository default branch)"
+      },
+      "branch": {
+        "type": "string",
+        "description": "Branch name to use for the pull request (defaults to aoai/issue-\u003cissueNumber\u003e)"
+      },
+      "createPullRequest": {
+        "type": "boolean",
+        "description": "If true, create a branch, push changes, and open a pull request instead of posting a comment"
+      },
       "issueNumber": {
         "type": "number",
         "description": "Issue number"
@@ -24,7 +31,12 @@
         "type": "string",
         "description": "Repository name"
       }
-    }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "issueNumber"
+    ]
   },
   "name": "assign_copilot_to_issue",
   "icons": [

@@ -999,7 +999,7 @@ func TestRequestCopilotReview(t *testing.T) {
 	require.Equal(t, "Bot", *reviewRequests.Users[0].Type, "expected review request to be for Bot")
 }
 
-func TestAssignCopilotToIssue(t *testing.T) {
+func TestAssignGitHubCopilotToIssue(t *testing.T) {
 	t.Parallel()
 
 	if getE2EHost() != "" && getE2EHost() != "https://github.com" {
@@ -1073,14 +1073,14 @@ func TestAssignCopilotToIssue(t *testing.T) {
 
 	t.Logf("Assigning copilot to issue in %s/%s...", currentOwner, repoName)
 	resp, err = mcpClient.CallTool(ctx, &mcp.CallToolParams{
-		Name: "assign_copilot_to_issue",
+		Name: "assign_github_copilot_to_issue",
 		Arguments: map[string]any{
 			"owner":       currentOwner,
 			"repo":        repoName,
 			"issueNumber": 1,
 		},
 	})
-	require.NoError(t, err, "expected to call 'assign_copilot_to_issue' tool successfully")
+	require.NoError(t, err, "expected to call 'assign_github_copilot_to_issue' tool successfully")
 
 	textContent, ok = resp.Content[0].(*mcp.TextContent)
 	require.True(t, ok, "expected content to be of type TextContent")

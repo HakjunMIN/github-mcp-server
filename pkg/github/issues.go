@@ -1593,7 +1593,370 @@ func (d *mvpDescription) String() string {
 	return sb.String()
 }
 
+const assignCopilotToIssueMarker = "<!-- github-mcp-server:assign_copilot_to_issue -->"
+
 func AssignCopilotToIssue(t translations.TranslationHelperFunc) inventory.ServerTool {
+	description := mvpDescription{
+		summary: "Use Azure OpenAI to respond to a GitHub issue by posting a comment or creating a pull request.",
+		outcomes: []string{
+			"an issue comment created or updated with analysis and next steps",
+			"a pull request opened with proposed code changes",
+		},
+		referenceLinks: []string{
+			"https://learn.microsoft.com/azure/ai-services/openai/",
+		},
+	}
+
+	return NewTool(
+		ToolsetMetadataIssues,
+		mcp.Tool{
+			Name:        "assign_copilot_to_issue",
+			Description: t("TOOL_ASSIGN_COPILOT_TO_ISSUE_DESCRIPTION", description.String()),
+			Icons:       octicons.Icons("copilot"),
+			Annotations: &mcp.ToolAnnotations{
+				Title:          t("TOOL_ASSIGN_COPILOT_TO_ISSUE_USER_TITLE", "Assign Copilot to issue"),
+				ReadOnlyHint:   false,
+				IdempotentHint: true,
+			},
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"owner": {
+						Type:        "string",
+						Description: "Repository owner",
+					},
+					"repo": {
+						Type:        "string",
+						Description: "Repository name",
+					},
+					"issueNumber": {
+						Type:        "number",
+						Description: "Issue number",
+					},
+					"createPullRequest": {
+						Type:        "boolean",
+						Description: "If true, create a branch, push changes, and open a pull request instead of posting a comment",
+					},
+					"base": {
+						Type:        "string",
+						Description: "Base branch to target when creating a pull request (defaults to repository default branch)",
+					},
+					"branch": {
+						Type:        "string",
+						Description: "Branch name to use for the pull request (defaults to aoai/issue-<issueNumber>)",
+					},
+				},
+				Required: []string{"owner", "repo", "issueNumber"},
+			},
+		},
+		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+			owner, err := RequiredParam[string](args, "owner")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			repoName, err := RequiredParam[string](args, "repo")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			issueNumber, err := RequiredInt(args, "issueNumber")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			createPullRequest, err := OptionalBoolParamWithDefault(args, "createPullRequest", false)
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			base, err := OptionalParam[string](args, "base")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			branch, err := OptionalParam[string](args, "branch")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			cfg, err := AzureOpenAIConfigFromEnv()
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			client, err := deps.GetClient(ctx)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to get GitHub client: %w", err)
+			}
+
+			issue, issueResp, err := client.Issues.Get(ctx, owner, repoName, issueNumber)
+			if err != nil {
+				return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get issue", issueResp, err), nil, nil
+			}
+			defer func() { _ = issueResp.Body.Close() }()
+
+			issueBody := strings.TrimSpace(issue.GetBody())
+			const maxIssueBodyChars = 20000
+			if len(issueBody) > maxIssueBodyChars {
+				issueBody = issueBody[:maxIssueBodyChars] + "\n\n[truncated]"
+			}
+
+			if createPullRequest {
+				repo, repoResp, err := client.Repositories.Get(ctx, owner, repoName)
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get repository", repoResp, err), nil, nil
+				}
+				defer func() { _ = repoResp.Body.Close() }()
+
+				baseBranch := strings.TrimSpace(base)
+				if baseBranch == "" {
+					baseBranch = strings.TrimSpace(repo.GetDefaultBranch())
+				}
+				if baseBranch == "" {
+					baseBranch = "main"
+				}
+
+				branchName := strings.TrimSpace(branch)
+				if branchName == "" {
+					branchName = fmt.Sprintf("aoai/issue-%d", issueNumber)
+				}
+
+				type aoaiFileChange struct {
+					Path    string `json:"path"`
+					Content string `json:"content"`
+				}
+				type aoaiPRPlan struct {
+					CommitMessage string           `json:"commit_message"`
+					PRTitle       string           `json:"pr_title"`
+					PRBody        string           `json:"pr_body"`
+					Files         []aoaiFileChange `json:"files"`
+				}
+
+				systemPrompt := "You are a senior software engineering agent. Return a single JSON object ONLY (no Markdown, no code fences). The JSON must include: commit_message, pr_title, pr_body, files (array of {path, content}). Use complete file contents for each file. Do not include secrets."
+				userPrompt := fmt.Sprintf(
+					"Repository: %s/%s\nBase branch: %s\nTarget branch: %s\nIssue: #%d\nTitle: %s\nURL: %s\n\nIssue body:\n%s\n\nTask: Propose a small, focused change set that addresses the issue.",
+					owner,
+					repoName,
+					baseBranch,
+					branchName,
+					issueNumber,
+					strings.TrimSpace(issue.GetTitle()),
+					strings.TrimSpace(issue.GetHTMLURL()),
+					issueBody,
+				)
+
+				generated, err := AzureOpenAIChatCompletion(ctx, cfg, systemPrompt, userPrompt)
+				if err != nil {
+					return utils.NewToolResultError(err.Error()), nil, nil
+				}
+				generated = strings.TrimSpace(generated)
+				generated = strings.TrimPrefix(generated, "```json")
+				generated = strings.TrimPrefix(generated, "```")
+				generated = strings.TrimSuffix(generated, "```")
+				generated = strings.TrimSpace(generated)
+
+				var plan aoaiPRPlan
+				if err := json.Unmarshal([]byte(generated), &plan); err != nil {
+					return utils.NewToolResultError(fmt.Sprintf("failed to parse Azure OpenAI JSON response: %v", err)), nil, nil
+				}
+				if strings.TrimSpace(plan.CommitMessage) == "" {
+					plan.CommitMessage = fmt.Sprintf("AOAI: issue #%d", issueNumber)
+				}
+				if strings.TrimSpace(plan.PRTitle) == "" {
+					plan.PRTitle = strings.TrimSpace(issue.GetTitle())
+					if plan.PRTitle == "" {
+						plan.PRTitle = fmt.Sprintf("AOAI changes for issue #%d", issueNumber)
+					}
+				}
+				if len(plan.Files) == 0 {
+					return utils.NewToolResultError("Azure OpenAI did not return any files to change"), nil, nil
+				}
+				if len(plan.Files) > 50 {
+					return utils.NewToolResultError("Azure OpenAI returned too many files (max 50)"), nil, nil
+				}
+				for _, f := range plan.Files {
+					p := strings.TrimSpace(f.Path)
+					if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "..") || strings.Contains(p, "\\") {
+						return utils.NewToolResultError("Azure OpenAI returned an invalid file path"), nil, nil
+					}
+					if len(f.Content) > 500_000 {
+						return utils.NewToolResultError("Azure OpenAI returned a file that is too large (max 500k chars)"), nil, nil
+					}
+				}
+
+				// Get base ref SHA.
+				baseRef, resp, err := client.Git.GetRef(ctx, owner, repoName, "refs/heads/"+baseBranch)
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get base branch reference", resp, err), nil, nil
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				// Ensure branch exists.
+				_, resp, err = client.Git.GetRef(ctx, owner, repoName, "refs/heads/"+branchName)
+				if err != nil {
+					// Only create the branch if it doesn't exist.
+					if resp == nil || resp.StatusCode != http.StatusNotFound {
+						return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get branch reference", resp, err), nil, nil
+					}
+					if resp.Body != nil {
+						_ = resp.Body.Close()
+					}
+
+					if baseRef.Object == nil || baseRef.Object.SHA == nil {
+						return utils.NewToolResultError("failed to get base branch reference sha"), nil, nil
+					}
+
+					newRef := github.CreateRef{
+						Ref: "refs/heads/" + branchName,
+						SHA: *baseRef.Object.SHA,
+					}
+					_, createResp, createErr := client.Git.CreateRef(ctx, owner, repoName, newRef)
+					if createErr != nil {
+						return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to create branch", createResp, createErr), nil, nil
+					}
+					defer func() { _ = createResp.Body.Close() }()
+				} else {
+					defer func() { _ = resp.Body.Close() }()
+				}
+
+				// Push files in a single commit (same approach as push_files tool).
+				ref, resp, err := client.Git.GetRef(ctx, owner, repoName, "refs/heads/"+branchName)
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get branch reference", resp, err), nil, nil
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				baseCommit, resp, err := client.Git.GetCommit(ctx, owner, repoName, *ref.Object.SHA)
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get base commit", resp, err), nil, nil
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				var entries []*github.TreeEntry
+				for _, f := range plan.Files {
+					entries = append(entries, &github.TreeEntry{
+						Path:    github.Ptr(strings.TrimSpace(f.Path)),
+						Mode:    github.Ptr("100644"),
+						Type:    github.Ptr("blob"),
+						Content: github.Ptr(f.Content),
+					})
+				}
+
+				newTree, resp, err := client.Git.CreateTree(ctx, owner, repoName, *baseCommit.Tree.SHA, entries)
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to create tree", resp, err), nil, nil
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				commit := github.Commit{
+					Message: github.Ptr(strings.TrimSpace(plan.CommitMessage)),
+					Tree:    newTree,
+					Parents: []*github.Commit{{SHA: baseCommit.SHA}},
+				}
+				newCommit, resp, err := client.Git.CreateCommit(ctx, owner, repoName, commit, nil)
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to create commit", resp, err), nil, nil
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				ref.Object.SHA = newCommit.SHA
+				_, resp, err = client.Git.UpdateRef(ctx, owner, repoName, *ref.Ref, github.UpdateRef{SHA: *newCommit.SHA, Force: github.Ptr(false)})
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to update reference", resp, err), nil, nil
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				// Reuse existing open PR for this head/base if present.
+				head := owner + ":" + branchName
+				prs, resp, err := client.PullRequests.List(ctx, owner, repoName, &github.PullRequestListOptions{State: "open", Head: head, Base: baseBranch, ListOptions: github.ListOptions{PerPage: 1}})
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to list pull requests", resp, err), nil, nil
+				}
+				if resp != nil {
+					defer func() { _ = resp.Body.Close() }()
+				}
+				if len(prs) > 0 {
+					minimal := MinimalResponse{ID: fmt.Sprintf("%d", prs[0].GetID()), URL: prs[0].GetHTMLURL()}
+					out, err := json.Marshal(minimal)
+					if err != nil {
+						return utils.NewToolResultErrorFromErr("failed to marshal response", err), nil, nil
+					}
+					return utils.NewToolResultText(string(out)), nil, nil
+				}
+
+				newPR := &github.NewPullRequest{Title: github.Ptr(strings.TrimSpace(plan.PRTitle)), Head: github.Ptr(branchName), Base: github.Ptr(baseBranch)}
+				if strings.TrimSpace(plan.PRBody) != "" {
+					newPR.Body = github.Ptr(strings.TrimSpace(plan.PRBody))
+				}
+
+				pr, resp, err := client.PullRequests.Create(ctx, owner, repoName, newPR)
+				if err != nil {
+					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to create pull request", resp, err), nil, nil
+				}
+				if resp != nil {
+					defer func() { _ = resp.Body.Close() }()
+				}
+
+				minimal := MinimalResponse{ID: fmt.Sprintf("%d", pr.GetID()), URL: pr.GetHTMLURL()}
+				out, err := json.Marshal(minimal)
+				if err != nil {
+					return utils.NewToolResultErrorFromErr("failed to marshal response", err), nil, nil
+				}
+				return utils.NewToolResultText(string(out)), nil, nil
+			}
+
+			systemPrompt := "You are a senior software engineering assistant. Provide a concise, actionable response in Markdown with a short summary, recommended next steps, and any key questions needed to proceed. Avoid requesting or revealing secrets."
+			userPrompt := fmt.Sprintf(
+				"Repository: %s/%s\nIssue: #%d\nTitle: %s\nURL: %s\n\nBody:\n%s",
+				owner,
+				repoName,
+				issueNumber,
+				strings.TrimSpace(issue.GetTitle()),
+				strings.TrimSpace(issue.GetHTMLURL()),
+				issueBody,
+			)
+
+			generated, err := AzureOpenAIChatCompletion(ctx, cfg, systemPrompt, userPrompt)
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			commentBody := assignCopilotToIssueMarker + "\n\n" + generated
+
+			var existing *github.IssueComment
+			opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
+			for {
+				comments, resp, err := client.Issues.ListComments(ctx, owner, repoName, issueNumber, opts)
+				if err != nil {
+					return utils.NewToolResultError(fmt.Sprintf("failed to list issue comments: %v", err)), nil, nil
+				}
+				for _, c := range comments {
+					if c != nil && strings.Contains(c.GetBody(), assignCopilotToIssueMarker) {
+						existing = c
+						break
+					}
+				}
+				if existing != nil || resp == nil || resp.NextPage == 0 {
+					break
+				}
+				opts.Page = resp.NextPage
+			}
+
+			if existing != nil {
+				_, _, err = client.Issues.EditComment(ctx, owner, repoName, existing.GetID(), &github.IssueComment{Body: github.Ptr(commentBody)})
+				if err != nil {
+					return utils.NewToolResultError(fmt.Sprintf("failed to update issue comment: %v", err)), nil, nil
+				}
+				return utils.NewToolResultText("successfully updated Azure OpenAI response on issue"), nil, nil
+			}
+
+			_, _, err = client.Issues.CreateComment(ctx, owner, repoName, issueNumber, &github.IssueComment{Body: github.Ptr(commentBody)})
+			if err != nil {
+				return utils.NewToolResultError(fmt.Sprintf("failed to create issue comment: %v", err)), nil, nil
+			}
+
+			return utils.NewToolResultText("successfully posted Azure OpenAI response to issue"), nil, nil
+		},
+	)
+}
+
+func AssignGitHubCopilotToIssue(t translations.TranslationHelperFunc) inventory.ServerTool {
 	description := mvpDescription{
 		summary: "Assign Copilot to a specific issue in a GitHub repository.",
 		outcomes: []string{
@@ -1607,11 +1970,11 @@ func AssignCopilotToIssue(t translations.TranslationHelperFunc) inventory.Server
 	return NewTool(
 		ToolsetMetadataIssues,
 		mcp.Tool{
-			Name:        "assign_copilot_to_issue",
+			Name:        "assign_github_copilot_to_issue",
 			Description: t("TOOL_ASSIGN_COPILOT_TO_ISSUE_DESCRIPTION", description.String()),
 			Icons:       octicons.Icons("copilot"),
 			Annotations: &mcp.ToolAnnotations{
-				Title:          t("TOOL_ASSIGN_COPILOT_TO_ISSUE_USER_TITLE", "Assign Copilot to issue"),
+				Title:          t("TOOL_ASSIGN_COPILOT_TO_ISSUE_USER_TITLE", "Assign GitHub Copilot to issue"),
 				ReadOnlyHint:   false,
 				IdempotentHint: true,
 			},
@@ -1812,7 +2175,7 @@ func AssignCodingAgentPrompt(t translations.TranslationHelperFunc) inventory.Ser
 				{
 					Role: "user",
 					Content: &mcp.TextContent{
-						Text: "You are a personal assistant for GitHub the Copilot GitHub Coding Agent. Your task is to help the user assign tasks to the Coding Agent based on their open GitHub issues. You can use `assign_copilot_to_issue` tool to assign the Coding Agent to issues that are suitable for autonomous work, and `search_issues` tool to find issues that match the user's criteria. You can also use `list_issues` to get a list of issues in the repository.",
+						Text: "You are a personal assistant for GitHub the Copilot GitHub Coding Agent. Your task is to help the user assign tasks to the Coding Agent based on their open GitHub issues. You can use `assign_github_copilot_to_issue` tool to assign the Coding Agent to issues that are suitable for autonomous work, and `search_issues` tool to find issues that match the user's criteria. You can also use `list_issues` to get a list of issues in the repository.",
 					},
 				},
 				{
