@@ -3,22 +3,10 @@
     "idempotentHint": true,
     "title": "Assign Copilot to issue"
   },
-  "description": "Use Azure OpenAI to respond to a GitHub issue by posting a comment or creating a pull request.\n\nThis tool can help with the following outcomes:\n- an issue comment created or updated with analysis and next steps\n- a pull request opened with proposed code changes\n\n\nMore information can be found at:\n- https://learn.microsoft.com/azure/ai-services/openai/\n",
+  "description": "Use SWE Agent to automatically resolve a GitHub issue by creating a pull request.\n\nThis tool can help with the following outcomes:\n- a job submitted to SWE Agent that will analyze the issue and create a pull request with proposed code changes\n\n\nMore information can be found at:\n- https://github.com/princeton-nlp/SWE-agent\n",
   "inputSchema": {
     "type": "object",
     "properties": {
-      "base": {
-        "type": "string",
-        "description": "Base branch to target when creating a pull request (defaults to repository default branch)"
-      },
-      "branch": {
-        "type": "string",
-        "description": "Branch name to use for the pull request (defaults to aoai/issue-\u003cissueNumber\u003e)"
-      },
-      "createPullRequest": {
-        "type": "boolean",
-        "description": "If true, create a branch, push changes, and open a pull request instead of posting a comment"
-      },
       "issueNumber": {
         "type": "number",
         "description": "Issue number"
