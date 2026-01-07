@@ -85,40 +85,7 @@ script/generate-docs
 
 GHES 환경에서 비동기 코딩 에이전트를 사용하려면 [HakjunMIN/swe-agent](https://github.com/HakjunMIN/swe-agent) 프로젝트를 REST API 서버로 실행해야 합니다.
 
-### SWE Agent REST API 서버 설정
-
-1. **SWE Agent 저장소 클론**
-   ```bash
-   git clone https://github.com/HakjunMIN/swe-agent.git
-   cd swe-agent
-   ```
-
-2. **환경 변수 설정** (`.env` 파일 생성)
-   ```env
-   AZURE_OPENAI_API_BASE=https://your-azure-openai-endpoint
-   AZURE_OPENAI_API_KEY=your-azure-openai-key
-   AZURE_OPENAI_MODEL=azure/gpt-4o
-   AZURE_OPENAI_API_VERSION=2024-02-15-preview
-   GITHUB_TOKEN=your-github-token
-   ```
-
-3. **REST API 서버 실행**
-   ```bash
-   # Python 가상 환경 생성
-   python -m venv venv
-   source venv/bin/activate
-
-   # 의존성 설치
-   pip install -r requirements.txt
-
-   # API 서버 실행 (기본 포트: 8000)
-   python -m swe_agent.api.server
-   ```
-
-4. **서버 확인**
-   ```bash
-   curl http://localhost:8000/health
-   ```
+https://github.com/HakjunMIN/swe-agent 의 README를 참조하여 SWE Agent를 설정하고 실행하세요.
 
 ---
 
@@ -220,12 +187,11 @@ VS Code의 MCP 설정은 `mcp.json` 파일에 저장됩니다. 일반적으로 �
 |---------|-----|---------|
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub Personal Access Token | ✅ 필수 |
 | `GITHUB_HOST` | GHES 호스트 URL (예: `https://github.company.com`) | GHES 사용 시 필수 |
-| `SWE_AGENT_ENDPOINT` | SWE Agent REST API 엔드포인트 (기본값: `http://localhost:8000`) | 코딩 에이전트 사용 시 필수 |
-| `AZURE_OPENAI_API_BASE` | Azure OpenAI API 베이스 URL | SWE Agent 사용 시 필수 |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI API 키 | SWE Agent 사용 시 필수 |
-| `AZURE_OPENAI_MODEL` | Azure OpenAI 모델 이름 (예: `azure/gpt-4o`) | SWE Agent 사용 시 필수 |
-| `AZURE_OPENAI_API_VERSION` | Azure OpenAI API 버전 | SWE Agent 사용 시 필수 |
-| `GITHUB_TOKEN` | SWE Agent가 사용할 GitHub 토큰 | SWE Agent 사용 시 필수 |
+| `AZURE_OPENAI_API_BASE` | Azure OpenAI API 베이스 URL | 코딩/리뷰 에이전트 사용 시 필수 |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API 키 | 코딩/리뷰 에이전트 사용 시 필수 |
+| `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI 모델 이름 (예: `gpt-5-chat`) |리뷰 에이전트 사용 모델 (에이전트 대체시 필요없음)|
+| `AZURE_OPENAI_MODEL` | Azure OpenAI 모델 이름 (예: `azure/gpt-5-chat`) | 코딩/리뷰 에이전트 사용 시 필수 |
+| `AZURE_OPENAI_API_VERSION` | Azure OpenAI API 버전 | 코딩/리뷰 에이전트 사용 시 필수 |
 | `GITHUB_TOOLSETS` | 활성화할 툴셋 (쉼표로 구분) | 선택 사항 |
 | `GITHUB_READ_ONLY` | 읽기 전용 모드 활성화 (`1` 설정 시) | 선택 사항 |
 
@@ -265,6 +231,7 @@ SWE Agent를 구성한 후, 이슈를 코딩 에이전트에게 할당할 수 �
 @github 최근 생성된 PR을 보여줘
 ```
 
+
 ---
 
 ## 📋 MCP 도구 목록
@@ -273,6 +240,9 @@ SWE Agent를 구성한 후, 이슈를 코딩 에이전트에게 할당할 수 �
 
 - **`assign_github_copilot_to_issue`**: GitHub 이슈를 SWE Agent에게 할당하여 자동으로 해결
 - **`assign_copilot_to_issue`**: (레거시) 코딩 에이전트에게 이슈 할당
+- **`request_copilot_review`**: PR에 대한 코드 리뷰를 요청하고 코멘트로 게시
+
+> **참고**: review agent는 별도로 Azure OpenAI를 직접 호출하게 되어있으나, 적절한 에이전트를 만들거나 시스템 프롬프트를 주입하여 사용 가능합니다.
 
 ### 리포지토리 관리
 

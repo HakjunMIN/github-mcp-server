@@ -33,7 +33,7 @@ func SWEAgentConfigFromEnv() (SWEAgentConfig, error) {
 		AzureOpenAIAPIKey:  strings.TrimSpace(os.Getenv("AZURE_OPENAI_API_KEY")),
 		AzureOpenAIModel:   strings.TrimSpace(os.Getenv("AZURE_OPENAI_MODEL")),
 		AzureAPIVersion:    strings.TrimSpace(os.Getenv("AZURE_OPENAI_API_VERSION")),
-		GitHubToken:        strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
+		GitHubToken:        strings.TrimSpace(os.Getenv("GITHUB_PERSONAL_ACCESS_TOKEN")),
 	}
 
 	// Set default endpoint if not provided
@@ -55,7 +55,7 @@ func SWEAgentConfigFromEnv() (SWEAgentConfig, error) {
 		missing = append(missing, "AZURE_OPENAI_API_VERSION")
 	}
 	if cfg.GitHubToken == "" {
-		missing = append(missing, "GITHUB_TOKEN")
+		missing = append(missing, "GITHUB_PERSONAL_ACCESS_TOKEN")
 	}
 	if len(missing) > 0 {
 		return SWEAgentConfig{}, fmt.Errorf("missing SWE Agent configuration: %s", strings.Join(missing, ", "))
