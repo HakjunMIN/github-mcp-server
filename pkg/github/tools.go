@@ -189,6 +189,7 @@ func AllTools(t translations.TranslationHelperFunc) []inventory.ServerTool {
 		IssueWrite(t),
 		AddIssueComment(t),
 		AssignCopilotToIssue(t),
+		// AssignGitHubCopilotToIssue(t),
 		SubIssueWrite(t),
 
 		// User tools

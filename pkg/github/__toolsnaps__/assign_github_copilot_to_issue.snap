@@ -1,19 +1,19 @@
 {
   "annotations": {
     "idempotentHint": true,
-    "title": "Request Copilot review"
+    "title": "Assign GitHub Copilot to issue"
   },
-  "description": "Use Azure OpenAI to generate a code review for a pull request and post it as a comment.",
+  "description": "Assign Copilot to a specific issue in a GitHub repository.\n\nThis tool can help with the following outcomes:\n- a Pull Request created with source code changes to resolve the issue\n\n\nMore information can be found at:\n- https://docs.github.com/en/copilot/using-github-copilot/using-copilot-coding-agent-to-work-on-tasks/about-assigning-tasks-to-copilot\n",
   "inputSchema": {
     "type": "object",
     "properties": {
+      "issueNumber": {
+        "type": "number",
+        "description": "Issue number"
+      },
       "owner": {
         "type": "string",
         "description": "Repository owner"
-      },
-      "pullNumber": {
-        "type": "number",
-        "description": "Pull request number"
       },
       "repo": {
         "type": "string",
@@ -23,10 +23,10 @@
     "required": [
       "owner",
       "repo",
-      "pullNumber"
+      "issueNumber"
     ]
   },
-  "name": "request_copilot_review",
+  "name": "assign_github_copilot_to_issue",
   "icons": [
     {
       "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAABmJLR0QA/wD/AP+gvaeTAAAC20lEQVRIidWUS4wMURSGv3O7kWmPEMRrSMzcbl1dpqtmGuOxsCKECCKxEBusSJhIWEhsWLFAbC1sWFiISBARCyQ2kzSZGaMxHokgXvGIiMH0PRZjpJqqHpb+TeX+59z//H/q5sD/DqlX9H1/zFeX2qzIKoFWYDKgwBtUymL0UkNaT3V3d3/+5wG2EGxB9TDIxGFMvhVhb9/drpN/NaDJC7MGdwJk6TDCv0Gvq0lve9R762GUNdFDLleaZNBrICGq+4yhvf9TJtP/KZNB2PrLlbBliBfRhajuAwnFVa/n8/nkxFkv3GO9oJrzgwVxdesV71ov6I2r5fxggfWCatYL9yYmUJgLPH7Q29WZ4OED6Me4wuAdeQK6MMqna9t0GuibBHFAmgZ9JMG9BhkXZWoSCDSATIq7aguBD0wBplq/tZBgYDIwKnZAs99mFRYD9vd/YK0dpcqhobM6d9haWyOULRTbAauwuNlvsxHTYP3iBnVyXGAa8BIYC3oVeAKioCtAPEE7FCOgR0ErIJdBBZgNskzh40+NF6K6s+9e91lp9osrxMnFoTSmSmPVsF+E5cB0YEDgtoMjjypd5wCy+WC9GnajhEAa4bkqV9LOHKwa9/yneYeyUqwX3AdyQ5EeVrrqro/hYL0g+ggemKh4HGbPmVu0+fB8U76lpR6XgJwZpoGUpNYiusZg1tXjkmCAav0OMTXfJC4eVYPqwbot6l4BCPqyLhd7lwMAWC/cYb3gi/UCzRaKOxsbFzVEM1iv2Ebt5v2Dm14qZbJecZf1Ah3UCrcTbbB+awHnjgHLgHeinHYqZ8aPSXWWy+XvcQZLpdKI9/0D7UbZiLIJmABckVSqo+/OrUrNgF+D8q1LEdcBrAJGAJ8ROlGeicorABWdAswE5gOjge8CF8Ad66v03IjqJb75WS0tE0YOmNWqLBGReaAzgIkMLrt3oM9UpSzCzW9pd+FpT8/7JK3/Gz8Ao5X6wtwP7N4AAAAASUVORK5CYII=",

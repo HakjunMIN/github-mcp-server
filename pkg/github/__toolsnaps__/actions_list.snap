@@ -6,11 +6,6 @@
   "description": "Tools for listing GitHub Actions resources.\nUse this tool to list workflows in a repository, or list workflow runs, jobs, and artifacts for a specific workflow or workflow run.\n",
   "inputSchema": {
     "type": "object",
-    "required": [
-      "method",
-      "owner",
-      "repo"
-    ],
     "properties": {
       "method": {
         "type": "string",
@@ -47,7 +42,6 @@
       },
       "workflow_jobs_filter": {
         "type": "object",
-        "description": "Filters for workflow jobs. **ONLY** used when method is 'list_workflow_jobs'",
         "properties": {
           "filter": {
             "type": "string",
@@ -57,11 +51,11 @@
               "all"
             ]
           }
-        }
+        },
+        "description": "Filters for workflow jobs. **ONLY** used when method is 'list_workflow_jobs'"
       },
       "workflow_runs_filter": {
         "type": "object",
-        "description": "Filters for workflow runs. **ONLY** used when method is 'list_workflow_runs'",
         "properties": {
           "actor": {
             "type": "string",
@@ -120,9 +114,15 @@
               "waiting"
             ]
           }
-        }
+        },
+        "description": "Filters for workflow runs. **ONLY** used when method is 'list_workflow_runs'"
       }
-    }
+    },
+    "required": [
+      "method",
+      "owner",
+      "repo"
+    ]
   },
   "name": "actions_list"
 }

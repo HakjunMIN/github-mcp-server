@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/google/go-github/v79/github"
@@ -21,6 +22,8 @@ import (
 	"github.com/github/github-mcp-server/pkg/translations"
 	"github.com/github/github-mcp-server/pkg/utils"
 )
+
+const requestCopilotReviewMarker = "<!-- github-mcp-server:request_copilot_review -->"
 
 // PullRequestRead creates a tool to get details of a specific pull request.
 func PullRequestRead(t translations.TranslationHelperFunc) inventory.ServerTool {
@@ -1814,7 +1817,7 @@ func AddCommentToPendingReview(t translations.TranslationHelperFunc) inventory.S
 // RequestCopilotReview creates a tool to request a Copilot review for a pull request.
 // Note that this tool will not work on GHES where this feature is unsupported. In future, we should not expose this
 // tool if the configured host does not support it.
-func RequestCopilotReview(t translations.TranslationHelperFunc) inventory.ServerTool {
+func RequestGithubCopilotReview(t translations.TranslationHelperFunc) inventory.ServerTool {
 	schema := &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
@@ -1837,11 +1840,11 @@ func RequestCopilotReview(t translations.TranslationHelperFunc) inventory.Server
 	return NewTool(
 		ToolsetMetadataPullRequests,
 		mcp.Tool{
-			Name:        "request_copilot_review",
-			Description: t("TOOL_REQUEST_COPILOT_REVIEW_DESCRIPTION", "Request a GitHub Copilot code review for a pull request. Use this for automated feedback on pull requests, usually before requesting a human reviewer."),
+			Name:        "request_github_copilot_review",
+			Description: t("TOOL_REQUEST_GITHUB_COPILOT_REVIEW_DESCRIPTION", "(Backup) Request a GitHub Copilot code review for a pull request via GitHub's reviewer bot."),
 			Icons:       octicons.Icons("copilot"),
 			Annotations: &mcp.ToolAnnotations{
-				Title:        t("TOOL_REQUEST_COPILOT_REVIEW_USER_TITLE", "Request Copilot review"),
+				Title:        t("TOOL_REQUEST_GITHUB_COPILOT_REVIEW_USER_TITLE", "Request GitHub Copilot review"),
 				ReadOnlyHint: false,
 			},
 			InputSchema: schema,
@@ -1897,6 +1900,158 @@ func RequestCopilotReview(t translations.TranslationHelperFunc) inventory.Server
 			// Return nothing on success, as there's not much value in returning the Pull Request itself
 			return utils.NewToolResultText(""), nil, nil
 		})
+}
+
+// RequestCopilotReview creates a tool that generates a pull request review using Azure OpenAI.
+// The generated review is posted as a PR comment and is updated on subsequent runs.
+func RequestCopilotReview(t translations.TranslationHelperFunc) inventory.ServerTool {
+	schema := &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"owner": {
+				Type:        "string",
+				Description: "Repository owner",
+			},
+			"repo": {
+				Type:        "string",
+				Description: "Repository name",
+			},
+			"pullNumber": {
+				Type:        "number",
+				Description: "Pull request number",
+			},
+		},
+		Required: []string{"owner", "repo", "pullNumber"},
+	}
+
+	return NewTool(
+		ToolsetMetadataPullRequests,
+		mcp.Tool{
+			Name:        "request_copilot_review",
+			Description: t("TOOL_REQUEST_COPILOT_REVIEW_DESCRIPTION", "Use Azure OpenAI to generate a code review for a pull request and post it as a comment."),
+			Icons:       octicons.Icons("copilot"),
+			Annotations: &mcp.ToolAnnotations{
+				Title:          t("TOOL_REQUEST_COPILOT_REVIEW_USER_TITLE", "Request Copilot review"),
+				ReadOnlyHint:   false,
+				IdempotentHint: true,
+			},
+			InputSchema: schema,
+		},
+		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+			owner, err := RequiredParam[string](args, "owner")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			repoName, err := RequiredParam[string](args, "repo")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			pullNumber, err := RequiredInt(args, "pullNumber")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			cfg, err := AzureOpenAIConfigFromEnv()
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			client, err := deps.GetClient(ctx)
+			if err != nil {
+				return utils.NewToolResultErrorFromErr("failed to get GitHub client", err), nil, nil
+			}
+
+			pr, prResp, err := client.PullRequests.Get(ctx, owner, repoName, pullNumber)
+			if err != nil {
+				return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get pull request", prResp, err), nil, nil
+			}
+			defer func() { _ = prResp.Body.Close() }()
+
+			diffRaw, diffResp, err := client.PullRequests.GetRaw(ctx, owner, repoName, pullNumber, github.RawOptions{Type: github.Diff})
+			if err != nil {
+				return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get pull request diff", diffResp, err), nil, nil
+			}
+			defer func() { _ = diffResp.Body.Close() }()
+			if diffResp.StatusCode != http.StatusOK {
+				body, readErr := io.ReadAll(diffResp.Body)
+				if readErr != nil {
+					return utils.NewToolResultErrorFromErr("failed to read response body", readErr), nil, nil
+				}
+				return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, "failed to get pull request diff", diffResp, body), nil, nil
+			}
+
+			prTitle := strings.TrimSpace(pr.GetTitle())
+			prBody := strings.TrimSpace(pr.GetBody())
+			diffText := strings.TrimSpace(string(diffRaw))
+
+			const maxPRBodyChars = 20_000
+			if len(prBody) > maxPRBodyChars {
+				prBody = prBody[:maxPRBodyChars] + "\n\n[truncated]"
+			}
+			const maxDiffChars = 40_000
+			if len(diffText) > maxDiffChars {
+				diffText = diffText[:maxDiffChars] + "\n\n[truncated]"
+			}
+
+			systemPrompt := "You are a senior code reviewer. Provide a concise, actionable pull request review in Markdown. Include: Summary, Key issues, Suggestions, Testing notes, and Risk assessment. Avoid requesting or revealing secrets."
+			userPrompt := fmt.Sprintf(
+				"Repository: %s/%s\nPull request: #%d\nTitle: %s\nURL: %s\n\nDescription:\n%s\n\nDiff (may be truncated):\n%s",
+				owner,
+				repoName,
+				pullNumber,
+				prTitle,
+				strings.TrimSpace(pr.GetHTMLURL()),
+				prBody,
+				diffText,
+			)
+
+			generated, err := AzureOpenAIChatCompletion(ctx, cfg, systemPrompt, userPrompt)
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			commentBody := requestCopilotReviewMarker + "\n\n" + generated
+
+			var existing *github.IssueComment
+			opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
+			for {
+				comments, resp, listErr := client.Issues.ListComments(ctx, owner, repoName, pullNumber, opts)
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				if listErr != nil {
+					return utils.NewToolResultError(fmt.Sprintf("failed to list pull request comments: %v", listErr)), nil, nil
+				}
+				for _, c := range comments {
+					if c != nil && strings.Contains(c.GetBody(), requestCopilotReviewMarker) {
+						existing = c
+						break
+					}
+				}
+				if existing != nil || resp == nil || resp.NextPage == 0 {
+					break
+				}
+				opts.Page = resp.NextPage
+			}
+
+			if existing != nil {
+				_, _, editErr := client.Issues.EditComment(ctx, owner, repoName, existing.GetID(), &github.IssueComment{Body: github.Ptr(commentBody)})
+				if editErr != nil {
+					return utils.NewToolResultError(fmt.Sprintf("failed to update pull request review comment: %v", editErr)), nil, nil
+				}
+				return utils.NewToolResultText("successfully updated Azure OpenAI pull request review"), nil, nil
+			}
+
+			_, _, createErr := client.Issues.CreateComment(ctx, owner, repoName, pullNumber, &github.IssueComment{Body: github.Ptr(commentBody)})
+			if createErr != nil {
+				return utils.NewToolResultError(fmt.Sprintf("failed to create pull request review comment: %v", createErr)), nil, nil
+			}
+
+			return utils.NewToolResultText("successfully posted Azure OpenAI pull request review"), nil, nil
+		},
+	)
 }
 
 // newGQLString like takes something that approximates a string (of which there are many types in shurcooL/githubv4)

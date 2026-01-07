@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2163,15 +2165,15 @@ func Test_GetIssueLabels(t *testing.T) {
 	}
 }
 
-func TestAssignCopilotToIssue(t *testing.T) {
+func TestAssignGitHubCopilotToIssue(t *testing.T) {
 	t.Parallel()
 
 	// Verify tool definition
-	serverTool := AssignCopilotToIssue(translations.NullTranslationHelper)
+	serverTool := AssignGitHubCopilotToIssue(translations.NullTranslationHelper)
 	tool := serverTool.Tool
 	require.NoError(t, toolsnaps.Test(tool.Name, tool))
 
-	assert.Equal(t, "assign_copilot_to_issue", tool.Name)
+	assert.Equal(t, "assign_github_copilot_to_issue", tool.Name)
 	assert.NotEmpty(t, tool.Description)
 	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "owner")
 	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "repo")
@@ -2584,6 +2586,103 @@ func TestAssignCopilotToIssue(t *testing.T) {
 			require.Equal(t, textContent.Text, "successfully assigned copilot to issue")
 		})
 	}
+}
+
+func TestAssignCopilotToIssue(t *testing.T) {
+	// NOTE: This test uses environment variables via t.Setenv, so it must not run in parallel.
+
+	serverTool := AssignCopilotToIssue(translations.NullTranslationHelper)
+	tool := serverTool.Tool
+	require.NoError(t, toolsnaps.Test(tool.Name, tool))
+
+	assert.Equal(t, "assign_copilot_to_issue", tool.Name)
+	assert.NotEmpty(t, tool.Description)
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "owner")
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "repo")
+	assert.Contains(t, tool.InputSchema.(*jsonschema.Schema).Properties, "issueNumber")
+	assert.ElementsMatch(t, tool.InputSchema.(*jsonschema.Schema).Required, []string{"owner", "repo", "issueNumber"})
+
+	t.Run("missing SWE Agent env vars", func(t *testing.T) {
+		client := github.NewClient(&http.Client{})
+		deps := BaseDeps{Client: client}
+		handler := serverTool.Handler(deps)
+
+		request := createMCPRequest(map[string]any{"owner": "o", "repo": "r", "issueNumber": float64(1)})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getErrorResult(t, result)
+		assert.Contains(t, textContent.Text, "AZURE_OPENAI_API_BASE")
+	})
+
+	t.Run("successfully calls SWE Agent", func(t *testing.T) {
+		var receivedRequest atomic.Value
+
+		sweAgentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/run" {
+				http.NotFound(w, r)
+				return
+			}
+			b, _ := io.ReadAll(r.Body)
+			receivedRequest.Store(string(b))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"job_id":"test-job-123","status":"pending","message":"Job submitted successfully. Use /job/{job_id} to check status."}`)
+		}))
+		t.Cleanup(sweAgentServer.Close)
+
+		t.Setenv("SWE_AGENT_ENDPOINT", sweAgentServer.URL)
+		t.Setenv("AZURE_OPENAI_API_BASE", "https://test.openai.azure.com")
+		t.Setenv("AZURE_OPENAI_MODEL", "azure/gpt-5-chat")
+		t.Setenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
+		t.Setenv("AZURE_OPENAI_API_KEY", "test-key")
+		t.Setenv("GITHUB_TOKEN", "test-github-token")
+
+		client := github.NewClient(&http.Client{})
+		deps := BaseDeps{Client: client}
+		handler := serverTool.Handler(deps)
+
+		request := createMCPRequest(map[string]any{"owner": "owner", "repo": "repo", "issueNumber": float64(123)})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "test-job-123")
+		assert.Contains(t, textContent.Text, "pending")
+
+		received := receivedRequest.Load()
+		require.NotNil(t, received)
+		reqStr := received.(string)
+		assert.Contains(t, reqStr, "https://github.com/owner/repo/issues/123")
+		assert.Contains(t, reqStr, "https://github.com/owner/repo")
+		assert.Contains(t, reqStr, "azure/gpt-5-chat")
+		assert.Contains(t, reqStr, "test-github-token")
+	})
+
+	t.Run("SWE Agent returns error", func(t *testing.T) {
+		sweAgentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"internal server error"}`)
+		}))
+		t.Cleanup(sweAgentServer.Close)
+
+		t.Setenv("SWE_AGENT_ENDPOINT", sweAgentServer.URL)
+		t.Setenv("AZURE_OPENAI_API_BASE", "https://test.openai.azure.com")
+		t.Setenv("AZURE_OPENAI_MODEL", "azure/gpt-5-chat")
+		t.Setenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
+		t.Setenv("AZURE_OPENAI_API_KEY", "test-key")
+		t.Setenv("GITHUB_TOKEN", "test-github-token")
+
+		client := github.NewClient(&http.Client{})
+		deps := BaseDeps{Client: client}
+		handler := serverTool.Handler(deps)
+
+		request := createMCPRequest(map[string]any{"owner": "owner", "repo": "repo", "issueNumber": float64(123)})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getErrorResult(t, result)
+		assert.Contains(t, textContent.Text, "SWE Agent returned")
+	})
 }
 
 func Test_AddSubIssue(t *testing.T) {

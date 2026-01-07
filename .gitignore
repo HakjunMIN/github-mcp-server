@@ -1,6 +1,6 @@
 .idea
 cmd/github-mcp-server/github-mcp-server
-
+custom-github-mcp-server
 # VSCode
 .vscode/*
 !.vscode/launch.json

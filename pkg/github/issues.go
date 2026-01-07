@@ -1157,11 +1157,19 @@ func CreateIssue(ctx context.Context, client *github.Client, owner string, repo 
 		return utils.NewToolResultError("missing required parameter: title"), nil
 	}
 
+	// Filter out empty strings from assignees to avoid GitHub API validation errors
+	validAssignees := make([]string, 0, len(assignees))
+	for _, assignee := range assignees {
+		if strings.TrimSpace(assignee) != "" {
+			validAssignees = append(validAssignees, assignee)
+		}
+	}
+
 	// Create the issue request
 	issueRequest := &github.IssueRequest{
 		Title:     github.Ptr(title),
 		Body:      github.Ptr(body),
-		Assignees: &assignees,
+		Assignees: &validAssignees,
 		Labels:    &labels,
 	}
 
@@ -1218,8 +1226,17 @@ func UpdateIssue(ctx context.Context, client *github.Client, gqlClient *githubv4
 		issueRequest.Labels = &labels
 	}
 
+	// Filter out empty strings from assignees to avoid GitHub API validation errors
 	if len(assignees) > 0 {
-		issueRequest.Assignees = &assignees
+		validAssignees := make([]string, 0, len(assignees))
+		for _, assignee := range assignees {
+			if strings.TrimSpace(assignee) != "" {
+				validAssignees = append(validAssignees, assignee)
+			}
+		}
+		if len(validAssignees) > 0 {
+			issueRequest.Assignees = &validAssignees
+		}
 	}
 
 	if milestoneNum != 0 {
@@ -1595,6 +1612,88 @@ func (d *mvpDescription) String() string {
 
 func AssignCopilotToIssue(t translations.TranslationHelperFunc) inventory.ServerTool {
 	description := mvpDescription{
+		summary: "Use SWE Agent to automatically resolve a GitHub issue by creating a pull request.",
+		outcomes: []string{
+			"a job submitted to SWE Agent that will analyze the issue and create a pull request with proposed code changes",
+		},
+		referenceLinks: []string{
+			"https://github.com/princeton-nlp/SWE-agent",
+		},
+	}
+
+	return NewTool(
+		ToolsetMetadataIssues,
+		mcp.Tool{
+			Name:        "assign_copilot_to_issue",
+			Description: t("TOOL_ASSIGN_COPILOT_TO_ISSUE_DESCRIPTION", description.String()),
+			Icons:       octicons.Icons("copilot"),
+			Annotations: &mcp.ToolAnnotations{
+				Title:          t("TOOL_ASSIGN_COPILOT_TO_ISSUE_USER_TITLE", "Assign Copilot to issue"),
+				ReadOnlyHint:   false,
+				IdempotentHint: true,
+			},
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"owner": {
+						Type:        "string",
+						Description: "Repository owner",
+					},
+					"repo": {
+						Type:        "string",
+						Description: "Repository name",
+					},
+					"issueNumber": {
+						Type:        "number",
+						Description: "Issue number",
+					},
+				},
+				Required: []string{"owner", "repo", "issueNumber"},
+			},
+		},
+		func(ctx context.Context, _ ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+			owner, err := RequiredParam[string](args, "owner")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			repoName, err := RequiredParam[string](args, "repo")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			issueNumber, err := RequiredInt(args, "issueNumber")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			cfg, err := SWEAgentConfigFromEnv()
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			// Call SWE Agent to process the issue
+			sweResp, err := CallSWEAgent(ctx, cfg, owner, repoName, issueNumber)
+			if err != nil {
+				return utils.NewToolResultError(fmt.Sprintf("failed to call SWE Agent: %v", err)), nil, nil
+			}
+
+			// Return the job information to the user
+			result := map[string]string{
+				"job_id":  sweResp.JobID,
+				"status":  sweResp.Status,
+				"message": sweResp.Message,
+			}
+			out, err := json.Marshal(result)
+			if err != nil {
+				return utils.NewToolResultErrorFromErr("failed to marshal response", err), nil, nil
+			}
+
+			return utils.NewToolResultText(string(out)), nil, nil
+		},
+	)
+}
+
+func AssignGitHubCopilotToIssue(t translations.TranslationHelperFunc) inventory.ServerTool {
+	description := mvpDescription{
 		summary: "Assign Copilot to a specific issue in a GitHub repository.",
 		outcomes: []string{
 			"a Pull Request created with source code changes to resolve the issue",
@@ -1607,11 +1706,11 @@ func AssignCopilotToIssue(t translations.TranslationHelperFunc) inventory.Server
 	return NewTool(
 		ToolsetMetadataIssues,
 		mcp.Tool{
-			Name:        "assign_copilot_to_issue",
+			Name:        "assign_github_copilot_to_issue",
 			Description: t("TOOL_ASSIGN_COPILOT_TO_ISSUE_DESCRIPTION", description.String()),
 			Icons:       octicons.Icons("copilot"),
 			Annotations: &mcp.ToolAnnotations{
-				Title:          t("TOOL_ASSIGN_COPILOT_TO_ISSUE_USER_TITLE", "Assign Copilot to issue"),
+				Title:          t("TOOL_ASSIGN_COPILOT_TO_ISSUE_USER_TITLE", "Assign GitHub Copilot to issue"),
 				ReadOnlyHint:   false,
 				IdempotentHint: true,
 			},
@@ -1812,7 +1911,7 @@ func AssignCodingAgentPrompt(t translations.TranslationHelperFunc) inventory.Ser
 				{
 					Role: "user",
 					Content: &mcp.TextContent{
-						Text: "You are a personal assistant for GitHub the Copilot GitHub Coding Agent. Your task is to help the user assign tasks to the Coding Agent based on their open GitHub issues. You can use `assign_copilot_to_issue` tool to assign the Coding Agent to issues that are suitable for autonomous work, and `search_issues` tool to find issues that match the user's criteria. You can also use `list_issues` to get a list of issues in the repository.",
+						Text: "You are a personal assistant for GitHub the Copilot GitHub Coding Agent. Your task is to help the user assign tasks to the Coding Agent based on their open GitHub issues. You can use `assign_github_copilot_to_issue` tool to assign the Coding Agent to issues that are suitable for autonomous work, and `search_issues` tool to find issues that match the user's criteria. You can also use `list_issues` to get a list of issues in the repository.",
 					},
 				},
 				{
