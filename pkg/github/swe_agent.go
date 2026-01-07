@@ -190,7 +190,7 @@ type AzureOpenAIConfig struct {
 
 func AzureOpenAIConfigFromEnv() (AzureOpenAIConfig, error) {
 	cfg := AzureOpenAIConfig{
-		Endpoint:   strings.TrimSpace(os.Getenv("AZURE_OPENAI_ENDPOINT")),
+		Endpoint:   strings.TrimSpace(os.Getenv("AZURE_OPENAI_API_BASE")),
 		Deployment: strings.TrimSpace(os.Getenv("AZURE_OPENAI_DEPLOYMENT")),
 		APIVersion: strings.TrimSpace(os.Getenv("AZURE_OPENAI_API_VERSION")),
 		APIKey:     strings.TrimSpace(os.Getenv("AZURE_OPENAI_API_KEY")),
@@ -198,7 +198,7 @@ func AzureOpenAIConfigFromEnv() (AzureOpenAIConfig, error) {
 
 	var missing []string
 	if cfg.Endpoint == "" {
-		missing = append(missing, "AZURE_OPENAI_ENDPOINT")
+		missing = append(missing, "AZURE_OPENAI_API_BASE")
 	}
 	if cfg.Deployment == "" {
 		missing = append(missing, "AZURE_OPENAI_DEPLOYMENT")
@@ -214,7 +214,7 @@ func AzureOpenAIConfigFromEnv() (AzureOpenAIConfig, error) {
 	}
 
 	if _, err := url.Parse(cfg.Endpoint); err != nil {
-		return AzureOpenAIConfig{}, fmt.Errorf("invalid AZURE_OPENAI_ENDPOINT: %w", err)
+		return AzureOpenAIConfig{}, fmt.Errorf("invalid AZURE_OPENAI_API_BASE: %w", err)
 	}
 
 	return cfg, nil

@@ -2517,7 +2517,7 @@ func Test_RequestCopilotReview(t *testing.T) {
 	}))
 	t.Cleanup(aoai.Close)
 
-	t.Setenv("AZURE_OPENAI_ENDPOINT", aoai.URL)
+	t.Setenv("AZURE_OPENAI_API_BASE", aoai.URL)
 	t.Setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
 	t.Setenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
 	t.Setenv("AZURE_OPENAI_API_KEY", "test-key")
