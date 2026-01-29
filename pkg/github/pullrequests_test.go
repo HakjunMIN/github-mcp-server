@@ -2509,18 +2509,16 @@ func Test_RequestCopilotReview(t *testing.T) {
 	assert.Contains(t, schema.Properties, "pullNumber")
 	assert.ElementsMatch(t, schema.Required, []string{"owner", "repo", "pullNumber"})
 
-	aoai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	reviewAgent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
-		require.True(t, strings.Contains(r.URL.Path, "/openai/deployments/test-deployment/chat/completions"))
+		require.True(t, strings.Contains(r.URL.Path, "/api/v1/review"))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"AOAI review"}}]}`))
+		_, _ = w.Write([]byte(`{"review":"Review Agent review"}`))
 	}))
-	t.Cleanup(aoai.Close)
+	t.Cleanup(reviewAgent.Close)
 
-	t.Setenv("AZURE_OPENAI_API_BASE", aoai.URL)
-	t.Setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
-	t.Setenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-	t.Setenv("AZURE_OPENAI_API_KEY", "test-key")
+	t.Setenv("REVIEW_AGENT_ENDPOINT", reviewAgent.URL)
+	t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "test-github-token")
 
 	mockPR := &github.PullRequest{
 		Number:  github.Ptr(1),
@@ -2562,7 +2560,7 @@ func Test_RequestCopilotReview(t *testing.T) {
 			expect(t, expectations{
 				path: "/repos/owner/repo/issues/1/comments",
 				requestBody: map[string]any{
-					"body": requestCopilotReviewMarker + "\n\n" + "AOAI review",
+					"body": requestCopilotReviewMarker + "\n\n" + "Review Agent review",
 				},
 			}).andThen(
 				mockResponse(t, http.StatusCreated, &github.IssueComment{ID: github.Ptr(int64(123))}),
@@ -2584,7 +2582,7 @@ func Test_RequestCopilotReview(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.IsError)
 	textContent := getTextResult(t, result)
-	require.Equal(t, "successfully posted Azure OpenAI pull request review", textContent.Text)
+	require.Equal(t, "successfully posted pull request review from review agent", textContent.Text)
 }
 
 func Test_RequestGithubCopilotReview(t *testing.T) {

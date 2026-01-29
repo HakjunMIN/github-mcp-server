@@ -3,7 +3,7 @@
     "idempotentHint": true,
     "title": "Request Copilot review"
   },
-  "description": "Use Azure OpenAI to generate a code review for a pull request and post it as a comment.",
+  "description": "Call a review agent to generate a code review for a pull request and post it as a comment.",
   "inputSchema": {
     "type": "object",
     "properties": {

@@ -314,3 +314,96 @@ func (r azureOpenAIChatCompletionResponse) ErrorMessage() string {
 	}
 	return r.Error.Message
 }
+
+// ReviewAgentConfig contains the configuration for calling the Review Agent REST API.
+type ReviewAgentConfig struct {
+	Endpoint    string // Review Agent REST API endpoint (e.g., http://localhost:8001)
+	GitHubToken string // GitHub token for Review Agent
+}
+
+// ReviewAgentConfigFromEnv reads Review Agent configuration from environment variables.
+func ReviewAgentConfigFromEnv() (ReviewAgentConfig, error) {
+	cfg := ReviewAgentConfig{
+		Endpoint:    strings.TrimSpace(os.Getenv("REVIEW_AGENT_ENDPOINT")),
+		GitHubToken: strings.TrimSpace(os.Getenv("GITHUB_PERSONAL_ACCESS_TOKEN")),
+	}
+
+	// Set default endpoint if not provided
+	if cfg.Endpoint == "" {
+		cfg.Endpoint = "http://localhost:8001"
+	}
+
+	var missing []string
+	if cfg.GitHubToken == "" {
+		missing = append(missing, "GITHUB_PERSONAL_ACCESS_TOKEN")
+	}
+	if len(missing) > 0 {
+		return ReviewAgentConfig{}, fmt.Errorf("missing Review Agent configuration: %s", strings.Join(missing, ", "))
+	}
+
+	return cfg, nil
+}
+
+// ReviewAgentRequest represents the request body for Review Agent API.
+type ReviewAgentRequest struct {
+	PRURL     string `json:"pr_url"`
+	GitHubPAT string `json:"github_pat"`
+}
+
+// ReviewAgentResponse represents the response from Review Agent API.
+type ReviewAgentResponse struct {
+	Review  string `json:"review,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// CallReviewAgent sends a request to the Review Agent REST API to review a pull request.
+func CallReviewAgent(ctx context.Context, cfg ReviewAgentConfig, prURL string) (string, error) {
+	reqBody := ReviewAgentRequest{
+		PRURL:     prURL,
+		GitHubPAT: cfg.GitHubToken,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal Review Agent request: %w", err)
+	}
+
+	endpoint := strings.TrimSuffix(cfg.Endpoint, "/") + "/api/v1/review"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create Review Agent request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 120 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("review agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Review Agent response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("review agent returned %s: %s", resp.Status, string(respBody))
+	}
+
+	var reviewResp ReviewAgentResponse
+	if err := json.Unmarshal(respBody, &reviewResp); err != nil {
+		return "", fmt.Errorf("failed to decode Review Agent response: %w", err)
+	}
+
+	if reviewResp.Error != "" {
+		return "", fmt.Errorf("review agent error: %s", reviewResp.Error)
+	}
+
+	if reviewResp.Review == "" {
+		return "", errors.New("review agent returned empty review")
+	}
+
+	return reviewResp.Review, nil
+}
