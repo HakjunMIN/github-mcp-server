@@ -353,6 +353,8 @@ type ReviewAgentRequest struct {
 // ReviewAgentResponse represents the response from Review Agent API.
 type ReviewAgentResponse struct {
 	Review  string `json:"review,omitempty"`
+	Result  string `json:"result,omitempty"`
+	Content string `json:"content,omitempty"`
 	Error   string `json:"error,omitempty"`
 	Message string `json:"message,omitempty"`
 }
@@ -401,9 +403,21 @@ func CallReviewAgent(ctx context.Context, cfg ReviewAgentConfig, prURL string) (
 		return "", fmt.Errorf("review agent error: %s", reviewResp.Error)
 	}
 
-	if reviewResp.Review == "" {
-		return "", errors.New("review agent returned empty review")
+	// Check multiple possible response fields for the review content
+	review := reviewResp.Review
+	if review == "" {
+		review = reviewResp.Result
+	}
+	if review == "" {
+		review = reviewResp.Content
+	}
+	if review == "" {
+		review = reviewResp.Message
 	}
 
-	return reviewResp.Review, nil
+	if review == "" {
+		return "", fmt.Errorf("review agent returned empty review, raw response: %s", string(respBody))
+	}
+
+	return review, nil
 }

@@ -205,7 +205,7 @@ func AllTools(t translations.TranslationHelperFunc) []inventory.ServerTool {
 		MergePullRequest(t),
 		UpdatePullRequestBranch(t),
 		CreatePullRequest(t),
-		UpdatePullRequest(t),
+		UpdatePullRequest(t),	
 		RequestCopilotReview(t),
 		PullRequestReviewWrite(t),
 		AddCommentToPendingReview(t),
